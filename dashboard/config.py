@@ -15,7 +15,7 @@ API_URL = _secret_url or os.environ.get("API_URL", "http://127.0.0.1:8000")
 
 # Seconds to wait for the API before showing an error.
 REQUEST_TIMEOUT_SECONDS = 10
-
+API_BASE_URL = API_URL
 # Band colors used across the dashboard (roadmap section 8).
 # Keys are placeholders until we confirm the exact band strings the API returns.
 BAND_COLORS = {
