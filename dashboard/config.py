@@ -1,0 +1,15 @@
+import os
+
+# Base URL of the FastAPI backend. Override with an environment variable if needed.
+API_BASE_URL = os.getenv("ADMIN_API_URL", "http://127.0.0.1:8000").rstrip("/")
+
+# Seconds to wait for the API before showing an error.
+REQUEST_TIMEOUT_SECONDS = 10
+
+# Band colors used across the dashboard (roadmap section 8).
+# Keys are placeholders until we confirm the exact band strings the API returns.
+BAND_COLORS = {
+    "low": "#2e7d32",     # green
+    "medium": "#f9a825",  # amber
+    "high": "#c62828",    # red
+}

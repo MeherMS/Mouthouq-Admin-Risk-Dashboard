@@ -1,0 +1,21 @@
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+
+# Virtual environments
+venv/
+.venv/
+
+# Databases (synthetic data is regenerated from the seed, never committed)
+*.db
+*.sqlite
+*.sqlite3
+
+# Secrets and local config
+.env
+.streamlit/secrets.toml
+
+# Notebooks and logs
+.ipynb_checkpoints/
+*.log
