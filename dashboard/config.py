@@ -1,7 +1,17 @@
 import os
 
 # Base URL of the FastAPI backend. Override with an environment variable if needed.
-API_BASE_URL = os.getenv("ADMIN_API_URL", "http://127.0.0.1:8000").rstrip("/")
+#API_BASE_URL = os.getenv("ADMIN_API_URL", "http://127.0.0.1:8000").rstrip("/")
+
+
+try:
+    import streamlit as st
+    _secret_url = st.secrets.get("API_URL")
+except Exception:
+    _secret_url = None
+
+API_URL = _secret_url or os.environ.get("API_URL", "http://127.0.0.1:8000")
+
 
 # Seconds to wait for the API before showing an error.
 REQUEST_TIMEOUT_SECONDS = 10
