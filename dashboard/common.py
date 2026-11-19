@@ -3,6 +3,7 @@ import pandas as pd
 import streamlit as st
 from api_client import ApiError
 import plotly.express as px
+from backend_status import wait_for_backend
 
 from config import BAND_COLORS
 
@@ -32,7 +33,7 @@ def render_sidebar() -> None:
     st.session_state["admin_id"] = identity["id"]
     st.session_state["admin_role"] = identity["role"]
     st.sidebar.caption("Temporary identity. Replaced by real login later.")
-
+    wait_for_backend()
 
 def is_admin() -> bool:
     return st.session_state.get("admin_role") == "admin"
