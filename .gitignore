@@ -19,3 +19,5 @@ venv/
 # Notebooks and logs
 .ipynb_checkpoints/
 *.log
+
+!demo_data/risk.db
