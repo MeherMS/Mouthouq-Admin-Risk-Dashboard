@@ -11,8 +11,7 @@ TOP_N = 10
 st.set_page_config(page_title="Overview", layout="wide")
 render_sidebar()
 st.title("Overview")
-from config import API_BASE_URL, API_KEY
-st.info(f"Debug: API URL = {API_BASE_URL} | key loaded = {bool(API_KEY)} | key length = {len(API_KEY)}")
+
 #st.caption("Risk counts, trend, and the riskiest entities. Read-only.")
 st.caption("Risk counts, trend, and the riskiest entities. Read-only.")
 st.info(
