@@ -22,6 +22,7 @@ from common import (
 st.set_page_config(page_title="Stores", layout="wide")
 render_sidebar()
 st.title("Stores")
+st.caption("Store risk scores are not built yet. All stores show as Unscored until the store model is added.")
 
 # Matches AccountStatus in app/models.py.
 ACCOUNT_STATUS_OPTIONS = ["Any", "active", "pending", "frozen", "rejected"]
@@ -173,7 +174,8 @@ st.caption(
 
 scores = store.get("scores")
 if scores is None:
-    st.warning("No risk score available for this store.")
+    st.info("Store risk scoring is not built yet. This store has no risk score.")
+    #st.warning("No risk score available for this store.")
 else:
     m1, m2 = st.columns(2)
     with m1:
@@ -182,7 +184,7 @@ else:
         st.markdown(band_badge(scores["fraud_band"]), unsafe_allow_html=True)
     with m2:
         st.markdown("**Default risk**")
-        st.metric("Score (0–100)", fmt_score(scores["default_score"]))
+        st.metric("Default percentile (0–100)", fmt_score(scores["default_score"]))
         st.markdown(band_badge(scores["default_band"]), unsafe_allow_html=True)
 
     st.caption(
@@ -213,7 +215,8 @@ st.caption(
     f"Refund rate = refunded deals / {stats['paid_deals']:,} deals with a payment record."
 )
 st.caption(
-    "Delivery failures: not available. The data does not record them yet."
+    "Delivery failures: not shown yet. Shipment data exists, but the API does not return it yet."
+    #"Delivery failures: not available. The data does not record them yet."
 )
 st.divider()
 render_actions(f"/stores/{store['id']}", STORE_ACTIONS)

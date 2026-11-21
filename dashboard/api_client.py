@@ -1,6 +1,6 @@
 import requests
 
-from config import API_BASE_URL, REQUEST_TIMEOUT_SECONDS
+from config import API_BASE_URL, API_KEY, REQUEST_TIMEOUT_SECONDS
 
 
 class ApiError(Exception):
@@ -12,9 +12,12 @@ class ApiError(Exception):
         self.message = message
 
 
-def _admin_headers(admin_id: str | None) -> dict:
+def _headers(admin_id: str | None) -> dict:
+    headers = {"X-API-Key": API_KEY} if API_KEY else {}
     # The temporary identity header from Phase 3 (section 4.7).
-    return {"X-Admin-Id": admin_id} if admin_id else {}
+    if admin_id:
+        headers["X-Admin-Id"] = admin_id
+    return headers
 
 
 def _handle_response(response: requests.Response):
@@ -38,7 +41,7 @@ def get(path: str, params: dict | None = None, admin_id: str | None = None):
         response = requests.get(
             f"{API_BASE_URL}{path}",
             params=params,
-            headers=_admin_headers(admin_id),
+            headers=_headers(admin_id),
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except requests.RequestException:
@@ -51,7 +54,7 @@ def post(path: str, admin_id: str | None, payload: dict | None = None):
         response = requests.post(
             f"{API_BASE_URL}{path}",
             json=payload or {},
-            headers=_admin_headers(admin_id),
+            headers=_headers(admin_id),
             timeout=REQUEST_TIMEOUT_SECONDS,
         )
     except requests.RequestException:

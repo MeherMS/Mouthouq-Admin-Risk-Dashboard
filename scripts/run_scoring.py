@@ -1,259 +1,179 @@
-"""
-scripts/run_scoring.py
+"""Batch scoring for customers, as of the simulation end.
 
-Phase 2 scoring engine (prototype).
-- Default risk: logistic regression on 90-day trailing features.
-  Trained on cutoffs Feb-May 2026, tested on the 2026-08-01 cutoff.
-- Fraud risk: rule-based score (shared phone, cancellations).
-- Scores every customer as of the end of the simulation and writes to risk_scores.
+Default risk: logistic regression on DEFAULT_FEATURES, trained in-process on the
+Feb to May 2026 cutoffs (same code as app.ml.train). The stored default_score is a
+percentile rank across scored customers (0 to 100), not a probability.
+Default bands are percentile-based: High = top 1%, Medium = next 9%, Low = rest.
 
-Run from project root:  python -m scripts.run_scoring
+Fraud risk: Phase 2 rules, unchanged.
+  - Phone held by at least one other account: 60 points.
+  - Two or more cancelled deals closed in the 90 days before the scoring date: 40 points.
+  Absolute bands: Low 0 to 39, Medium 40 to 69, High 70 to 100.
+
+Re-running replaces rows with the same model_version. Rows from other versions
+are kept as score history.
+
+Run from project root: python -m scripts.run_scoring
 """
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 
 import numpy as np
 import pandas as pd
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import roc_auc_score
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import StandardScaler
 from sqlalchemy import text
 
 from app.db import engine
+from app.ml.config import SIM_END
+from app.ml.data import load_tables
+from app.ml.features import DEFAULT_FEATURES, build_customer_features
+from app.ml.train import TRAIN_CUTOFFS, build_dataset, fit
 
-MODEL_VERSION = "lr-default-v1+rules-fraud-v1"
-SIM_END = datetime(2026, 11, 15)
-HORIZON_DAYS = 90
-TRAIN_CUTOFFS = [datetime(2026, m, 1) for m in (2, 3, 4, 5)]
-TEST_CUTOFF = datetime(2026, 8, 1)
-SCORE_CUTOFF = SIM_END
+MODEL_VERSION = "lr-default-v2-trailing+rules-fraud-v1"
 
-FEATURES = [
-    "account_age_days",
-    "deals_30d",
-    "deals_90d",
-    "cancels_90d",
-    "late_share_90d",
-    "partial_share_90d",
-    "missed_share_90d",
-    "log_mean_amount_90d",
-]
+REVIEW_HIGH_FRACTION = 0.01
+REVIEW_MEDIUM_FRACTION = 0.10
+FRAUD_HIGH, FRAUD_MEDIUM = 70, 40
+PHONE_POINTS, CANCEL_POINTS = 60, 40
+CANCEL_LOOKBACK_DAYS = 90
+TOP_N_FACTORS = 3
 
-
-def band(score):
-    if score >= 70:
-        return "high"
-    if score >= 40:
-        return "medium"
-    return "low"
+INSERT_SQL = text("""
+    INSERT INTO risk_scores
+        (entity_type, entity_id, fraud_score, default_score, fraud_band,
+         default_band, model_version, computed_at, top_factors)
+    VALUES
+        (:entity_type, :entity_id, :fraud_score, :default_score, :fraud_band,
+         :default_band, :model_version, :computed_at, :top_factors)
+""")
 
 
-# ---------- Load ----------
-
-def read_table(name):
-    return pd.read_sql(text(f"SELECT * FROM {name}"), engine)
-
-
-def to_naive_utc(series):
-    return pd.to_datetime(series, utc=True).dt.tz_localize(None)
-
-
-def load_tables():
-    customers = read_table("customers")
-    deals = read_table("deals")
-    transactions = read_table("transactions")
-    events = read_table("payment_events")
-
-    customers["created_at"] = to_naive_utc(customers["created_at"])
-    deals["created_at"] = to_naive_utc(deals["created_at"])
-    deals["closed_at"] = to_naive_utc(deals["closed_at"])
-    events["occurred_at"] = to_naive_utc(events["occurred_at"])
-    deals["is_fraud"] = deals["is_fraud"].astype(bool)
-
-    # One row per payment event, with its customer and fraud flag attached
-    ev = (
-        events[["transaction_id", "event_type", "occurred_at"]]
-        .merge(
-            transactions[["id", "deal_id"]].rename(columns={"id": "transaction_id"}),
-            on="transaction_id",
-        )
-        .merge(
-            deals[["id", "customer_id", "is_fraud"]].rename(columns={"id": "deal_id"}),
-            on="deal_id",
-        )
-    )
-    return customers, deals, ev
-
-
-# ---------- Features (only data before the cutoff) ----------
-
-def build_features(customers, deals, ev, cutoff):
-    start90 = cutoff - timedelta(days=90)
-    start30 = cutoff - timedelta(days=30)
-
-    cust = customers[customers["created_at"] < cutoff].copy()
-    cust["shared_phone_count"] = cust["phone"].map(customers["phone"].value_counts())
-    cust = cust.set_index("id")
-
-    feats = cust[["shared_phone_count"]].copy()
-    feats["account_age_days"] = (cutoff - cust["created_at"]).dt.days
-
-    past = deals[deals["created_at"] < cutoff]
-    d30 = past[past["created_at"] >= start30]
-    d90 = past[past["created_at"] >= start90]
-    cancels = deals[
+def cancel_counts(tables: dict, cutoff: pd.Timestamp, index: pd.Index) -> pd.Series:
+    """Cancelled deals closed in the lookback window before the cutoff (Phase 2 rule)."""
+    start = cutoff - pd.Timedelta(days=CANCEL_LOOKBACK_DAYS)
+    deals = tables["deals"]
+    closed = deals[
         (deals["status"] == "cancelled")
+        & deals["closed_at"].notna()
         & (deals["closed_at"] < cutoff)
-        & (deals["closed_at"] >= start90)
+        & (deals["closed_at"] >= start)
     ]
-
-    feats["deals_30d"] = d30.groupby("customer_id").size()
-    feats["deals_90d"] = d90.groupby("customer_id").size()
-    feats["cancels_90d"] = cancels.groupby("customer_id").size()
-    feats["mean_amount_90d"] = d90.groupby("customer_id")["amount_sar"].mean()
-
-    e = ev[(ev["occurred_at"] < cutoff) & (ev["occurred_at"] >= start90)]
-    total = e.groupby("customer_id").size()
-    for kind in ["late", "partial", "missed"]:
-        count = e[e["event_type"] == kind].groupby("customer_id").size()
-        feats[f"{kind}_share_90d"] = count / total
-
-    feats = feats.fillna(0)
-    feats["log_mean_amount_90d"] = np.log1p(feats["mean_amount_90d"])
-    return feats[FEATURES + ["shared_phone_count"]]
+    return closed.groupby("customer_id").size().reindex(index).fillna(0).astype(int)
 
 
-# ---------- Labels (outcomes after the cutoff, within 90 days) ----------
-
-def build_labels(ev, cutoff, customer_ids):
-    end = cutoff + timedelta(days=HORIZON_DAYS)
-    assert end <= SIM_END, f"label window for {cutoff.date()} runs past simulation end"
-    missed = ev[
-        (ev["event_type"] == "missed")
-        & (ev["occurred_at"] >= cutoff)
-        & (ev["occurred_at"] < end)
-        & (~ev["is_fraud"])
-    ]
-    defaulted = list(set(missed["customer_id"]))
-    return pd.Series(customer_ids.isin(defaulted).astype(int), index=customer_ids)
+def fraud_band(scores: pd.Series) -> np.ndarray:
+    return np.select([scores >= FRAUD_HIGH, scores >= FRAUD_MEDIUM], ["high", "medium"], "low")
 
 
-def make_dataset(customers, deals, ev, cutoffs):
-    frames = []
-    for c in cutoffs:
-        X = build_features(customers, deals, ev, c)
-        y = build_labels(ev, c, X.index)
-        frames.append(X.assign(label=y, cutoff=c))
-    return pd.concat(frames)
+def main() -> None:
+    cutoff = pd.Timestamp(SIM_END)
+    tables = load_tables(engine)
 
-
-# ---------- Models ----------
-
-def train_default(train):
-    model = make_pipeline(StandardScaler(), LogisticRegression(max_iter=1000))
-    model.fit(train[FEATURES], train["label"])
-    return model
-
-
-def default_scores(model, X):
-    """Returns {customer_id: (score 0-100, top factors)}. Top factors are log-odds contributions."""
-    prob = model.predict_proba(X[FEATURES])[:, 1]
+    # Default model, trained on the same cutoffs and features as app.ml.train
+    train = build_dataset(tables, TRAIN_CUTOFFS)
+    model = fit(train, DEFAULT_FEATURES)
     scaler = model.named_steps["standardscaler"]
     coef = model.named_steps["logisticregression"].coef_[0]
-    contrib = scaler.transform(X[FEATURES]) * coef
 
-    out = {}
-    for i, cid in enumerate(X.index):
-        order = np.argsort(-contrib[i])[:3]
-        factors = [
-            {"factor": FEATURES[j], "log_odds_contribution": round(float(contrib[i, j]), 3)}
-            for j in order
-            if contrib[i, j] > 0
-        ]
-        out[int(cid)] = (round(float(prob[i]) * 100, 1), factors)
-    return out
+    X = build_customer_features(tables, cutoff)
+    ids = X.index
+    n = len(ids)
+    Xd = X[DEFAULT_FEATURES]
+    prob = model.predict_proba(Xd)[:, 1]
+    contrib = scaler.transform(Xd) * coef  # log-odds contribution per feature
 
+    # Default: percentile rank and percentile bands
+    rank_from_top = pd.Series(prob, index=ids).rank(method="first", ascending=False).astype(int)
+    default_score = (100 * (n - rank_from_top + 1) / n).round(2)
+    k_high = int(np.ceil(n * REVIEW_HIGH_FRACTION))
+    k_medium = int(np.ceil(n * REVIEW_MEDIUM_FRACTION))
+    default_band = pd.Series(
+        np.where(rank_from_top <= k_high, "high",
+                 np.where(rank_from_top <= k_medium, "medium", "low")),
+        index=ids,
+    )
 
-def fraud_scores(X):
-    """Returns {customer_id: (score 0-100, triggered rules)}."""
-    out = {}
-    for cid, r in X.iterrows():
-        score = 0
-        factors = []
-        if r["shared_phone_count"] >= 2:
-            score += 60
-            factors.append({
-                "factor": "shared_phone",
-                "detail": f"phone shared by {int(r['shared_phone_count'])} accounts",
-                "points": 60,
-            })
-        if r["cancels_90d"] >= 2:
-            score += 40
-            factors.append({
-                "factor": "cancellations",
-                "detail": f"{int(r['cancels_90d'])} cancelled deals in 90 days",
-                "points": 40,
-            })
-        out[int(cid)] = (min(score, 100), factors)
-    return out
+    # Fraud: Phase 2 rules
+    phone_accounts = (X["shared_phone_count"] + 1).round().astype(int)  # includes this account
+    cancels = cancel_counts(tables, cutoff, ids)
+    fraud_score = (
+        PHONE_POINTS * (phone_accounts >= 2).astype(int)
+        + CANCEL_POINTS * (cancels >= 2).astype(int)
+    ).clip(upper=100)
+    fraud_bands = pd.Series(fraud_band(fraud_score), index=ids)
 
-
-# ---------- Main ----------
-
-def main():
-    customers, deals, ev = load_tables()
-
-    train = make_dataset(customers, deals, ev, TRAIN_CUTOFFS)
-    test = make_dataset(customers, deals, ev, [TEST_CUTOFF])
-    print(f"Train rows: {len(train)}, default positives: {int(train['label'].sum())}")
-
-    model = train_default(train)
-    p_test = model.predict_proba(test[FEATURES])[:, 1]
-    print(f"Test ROC-AUC (default): {roc_auc_score(test['label'], p_test):.3f}")
-    print(f"Test default base rate: {test['label'].mean():.4f}")
-
-    X = build_features(customers, deals, ev, SCORE_CUTOFF)
-    d_map = default_scores(model, X)
-    f_map = fraud_scores(X)
-
+    # Assemble rows
     now = datetime.now(timezone.utc).replace(tzinfo=None).isoformat(sep=" ", timespec="seconds")
+    contrib_vals = np.asarray(contrib)
+    raw_vals = Xd.to_numpy()
+    phone_vals = phone_accounts.to_numpy()
+    cancel_vals = cancels.to_numpy()
+
     rows = []
-    for cid in X.index:
-        cid = int(cid)
-        d_score, d_factors = d_map[cid]
-        f_score, f_factors = f_map[cid]
+    for i, cid in enumerate(ids):
+        order = np.argsort(-contrib_vals[i])[:TOP_N_FACTORS]
+        default_factors = [
+            {
+                "factor": DEFAULT_FEATURES[j],
+                "value": round(float(raw_vals[i, j]), 3),
+                "log_odds_contribution": round(float(contrib_vals[i, j]), 3),
+            }
+            for j in order
+            if contrib_vals[i, j] > 0
+        ]
+
+        fraud_factors = []
+        if phone_vals[i] >= 2:
+            fraud_factors.append({
+                "factor": "shared_phone",
+                "detail": f"phone held by {int(phone_vals[i])} accounts",
+                "points": PHONE_POINTS,
+            })
+        if cancel_vals[i] >= 2:
+            fraud_factors.append({
+                "factor": "cancellations",
+                "detail": f"{int(cancel_vals[i])} cancelled deals in 90 days",
+                "points": CANCEL_POINTS,
+            })
+
         rows.append({
             "entity_type": "customer",
-            "entity_id": cid,
-            "fraud_score": f_score,
-            "default_score": d_score,
-            "fraud_band": band(f_score),
-            "default_band": band(d_score),
+            "entity_id": int(cid),
+            "fraud_score": float(fraud_score.loc[cid]),
+            "default_score": float(default_score.loc[cid]),
+            "fraud_band": str(fraud_bands.loc[cid]),
+            "default_band": str(default_band.loc[cid]),
             "model_version": MODEL_VERSION,
             "computed_at": now,
-            "top_factors": json.dumps({"default": d_factors, "fraud": f_factors}),
+            "top_factors": json.dumps({
+                "default": default_factors,
+                "fraud": fraud_factors,
+                "model_output": {
+                    "uncalibrated_probability": round(float(prob[i]), 5),
+                    "note": "Not calibrated. Use default_score (percentile) for ranking.",
+                },
+            }),
         })
 
     with engine.begin() as conn:
         conn.execute(
-            text("""
-                INSERT INTO risk_scores
-                    (entity_type, entity_id, fraud_score, default_score, fraud_band,
-                     default_band, model_version, computed_at, top_factors)
-                VALUES
-                    (:entity_type, :entity_id, :fraud_score, :default_score, :fraud_band,
-                     :default_band, :model_version, :computed_at, :top_factors)
-            """),
-            rows,
+            text("DELETE FROM risk_scores WHERE entity_type = 'customer' AND model_version = :v"),
+            {"v": MODEL_VERSION},
         )
+        conn.execute(INSERT_SQL, rows)
 
+    # Summary for checking
     summary = pd.DataFrame(rows)
-    print("\nDefault band counts:")
+    print(f"Scored {n} customers, model_version={MODEL_VERSION}")
+    print(f"\nDefault bands (expect 100 high, 900 medium):")
     print(summary["default_band"].value_counts().to_string())
-    print("\nFraud band counts:")
+    print(f"\nFraud bands (expect 9379 low, 601 medium, 20 high, same as v1):")
     print(summary["fraud_band"].value_counts().to_string())
-    print(f"\nWrote {len(rows)} customer scores, model_version={MODEL_VERSION}")
+    print(f"\nDefault score range: {summary['default_score'].min()} to {summary['default_score'].max()}")
+    print("\nTop default factor for high-band customers:")
+    top_first = summary.loc[summary["default_band"] == "high", "top_factors"].map(
+        lambda s: (json.loads(s)["default"] or [{"factor": "none"}])[0]["factor"]
+    )
+    print(top_first.value_counts().to_string())
 
 
 if __name__ == "__main__":

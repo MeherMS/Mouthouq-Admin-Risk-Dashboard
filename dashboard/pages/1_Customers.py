@@ -1,9 +1,11 @@
 import pandas as pd
 import streamlit as st
 import json
+from config import FACTOR_LABELS
 import plotly.graph_objects as go
 import api_client
 from api_client import ApiError
+from common import render_shipment_stats
 from common import (
     BAND_OPTIONS,
     CUSTOMER_ACTIONS,
@@ -52,7 +54,7 @@ def render_top_factors(raw):
 
     st.markdown("**Default risk drivers**")
     if default_items:
-        names = [f["factor"] for f in default_items][::-1]
+        names = [FACTOR_LABELS.get(f["factor"], f["factor"]) for f in default_items][::-1]
         values = [f["log_odds_contribution"] for f in default_items][::-1]
         fig = go.Figure(go.Bar(x=values, y=names, orientation="h", marker_color="#d9534f"))
         fig.update_layout(
@@ -190,8 +192,9 @@ else:
     m1, m2 = st.columns(2)
     with m1:
         st.markdown("**Fraud risk**")
-        st.metric("Score (0–100)", fmt_score(scores["fraud_score"]))
-        st.markdown(band_badge(scores["fraud_band"]), unsafe_allow_html=True)
+        st.metric("Default percentile (0–100)", fmt_score(scores["default_score"]))
+        st.markdown(band_badge(scores["default_band"]), unsafe_allow_html=True)
+        st.caption("Percentile rank among scored customers. Top 1% = High, next 9% = Medium, rest = Low.")
     with m2:
         st.markdown("**Default risk**")
         st.metric("Score (0–100)", fmt_score(scores["default_score"]))
@@ -213,6 +216,8 @@ else:
 
 st.divider()
 render_score_history("customer", cust["id"])
+st.divider()
+render_shipment_stats(cust["id"])
 st.divider()
 render_actions(f"/customers/{cust['id']}", CUSTOMER_ACTIONS)
 

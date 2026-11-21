@@ -5,7 +5,13 @@ from api_client import ApiError
 import plotly.express as px
 from backend_status import wait_for_backend
 
-from config import BAND_COLORS
+from config import (
+    BAND_COLORS,
+    DEFAULT_HIGH_MIN,
+    DEFAULT_MEDIUM_MIN,
+    FRAUD_HIGH_MIN,
+    FRAUD_MEDIUM_MIN,
+)
 
 BAND_OPTIONS = ["Any", "low", "medium", "high"]
 
@@ -167,13 +173,22 @@ def render_score_history(entity_type: str, entity_id: int) -> None:
         labels={"computed_at": "Computed at"},
     )
     fig.update_yaxes(range=[0, 100])
+    # The chart shows both scores on one axis. Fraud lines are dotted, default lines are dashed.
     fig.add_hline(
-        y=40, line_dash="dot", line_color=BAND_COLORS["medium"],
-        annotation_text="Medium (40)", annotation_position="top left",
+        y=FRAUD_MEDIUM_MIN, line_dash="dot", line_color=BAND_COLORS["medium"],
+        annotation_text=f"Fraud medium ({FRAUD_MEDIUM_MIN})", annotation_position="top left",
     )
     fig.add_hline(
-        y=70, line_dash="dot", line_color=BAND_COLORS["high"],
-        annotation_text="High (70)", annotation_position="top left",
+        y=FRAUD_HIGH_MIN, line_dash="dot", line_color=BAND_COLORS["high"],
+        annotation_text=f"Fraud high ({FRAUD_HIGH_MIN})", annotation_position="top left",
+    )
+    fig.add_hline(
+        y=DEFAULT_MEDIUM_MIN, line_dash="dash", line_color=BAND_COLORS["medium"],
+        annotation_text=f"Default medium (top 10%)", annotation_position="bottom left",
+    )
+    fig.add_hline(
+        y=DEFAULT_HIGH_MIN, line_dash="dash", line_color=BAND_COLORS["high"],
+        annotation_text=f"Default high (top 1%)", annotation_position="bottom left",
     )
     st.plotly_chart(fig, use_container_width=True)
 
@@ -389,3 +404,62 @@ def render_transaction_timeline(entity_path: str, limit: int = 50) -> None:
         st.caption(
             f"Showing the {len(items)} most recent of {page['total']} transactions."
         )
+
+REASON_LABELS = {
+    "address_not_found": "Address not found",
+    "recipient_unavailable": "Recipient unavailable",
+    "refused_by_customer": "Refused by customer",
+}
+
+
+def _pct(value: float | None) -> str:
+    return "—" if value is None else f"{value * 100:.1f}%"
+
+
+def render_shipment_stats(customer_id: int) -> None:
+    """Observed shipment history for one customer. Past counts only, no predictions."""
+    st.markdown("**Shipment history (observed, not predicted)**")
+    try:
+        s = api_client.get(f"/customers/{customer_id}/shipments/summary")
+    except ApiError as err:
+        st.error(err.message)
+        return
+
+    if s["shipments"] == 0:
+        st.caption("No physical-goods shipments for this customer.")
+        return
+
+    c1, c2, c3, c4 = st.columns(4)
+    c1.metric("Shipments", f"{s['shipments']:,}")
+    c2.metric("First-attempt success", _pct(s["first_attempt_success_rate"]))
+    c3.metric("Delivered on time", _pct(s["delivered_on_time_rate"]))
+    c4.metric(
+        "Store-marked deliveries returned",
+        f"{s['store_claimed_returned']:,} of {s['store_claimed_total']:,}",
+    )
+
+    if s["median_delivery_days"] is not None:
+        st.caption(
+            f"Median delivery {s['median_delivery_days']} days; "
+            f"median promised {s['median_promised_days']} days."
+        )
+
+    if s["failure_reasons"]:
+        st.dataframe(
+            pd.DataFrame([
+                {"Reason": REASON_LABELS.get(k, k), "Failed first attempts": v}
+                for k, v in s["failure_reasons"].items()
+            ]),
+            hide_index=True,
+        )
+
+    if s["low_sample"]:
+        st.warning(
+            f"Only {s['ordinary_shipments']} ordinary shipments. "
+            "Rates are not reliable at this size."
+        )
+
+    st.caption(
+        "Counts from past shipments. Store-marked deliveries are shown separately "
+        "because they can be a store-side problem."
+    )

@@ -19,7 +19,8 @@ DATETIME_COLUMNS = {
 
 
 def _to_naive_utc(series: pd.Series) -> pd.Series:
-    return pd.to_datetime(series, utc=True).dt.tz_localize(None)
+    # format="ISO8601" handles timestamps with and without microseconds in the same column.
+    return pd.to_datetime(series, utc=True, format="ISO8601").dt.tz_localize(None)
 
 
 def load_tables(engine) -> dict[str, pd.DataFrame]:
@@ -27,4 +28,5 @@ def load_tables(engine) -> dict[str, pd.DataFrame]:
     for name, cols in DATETIME_COLUMNS.items():
         for col in cols:
             tables[name][col] = _to_naive_utc(tables[name][col])
+    tables["deals"]["amount_sar"] = pd.to_numeric(tables["deals"]["amount_sar"])
     return tables

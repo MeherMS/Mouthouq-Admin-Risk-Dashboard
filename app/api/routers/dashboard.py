@@ -2,7 +2,7 @@ from datetime import datetime
 
 from fastapi import APIRouter, Depends
 from pydantic import BaseModel
-from sqlalchemy import  case, func, select
+from sqlalchemy import case, func, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_db
@@ -42,14 +42,14 @@ class TopEntity(BaseModel):
     fraud_band: str
     default_score: float
     default_band: str
-    max_score: float
 
 
 class DashboardSummary(BaseModel):
     customers: EntityRiskCounts
     stores: EntityRiskCounts
     trend: list[TrendPoint]
-    top_entities: list[TopEntity]
+    top_fraud: list[TopEntity]     # ranked by fraud score (absolute, 0-100)
+    top_default: list[TopEntity]   # ranked by default percentile (0-100)
     model_version: str | None
     computed_at: datetime | None
 
@@ -81,13 +81,11 @@ def _entity_counts(db: Session, entity_type: EntityType) -> EntityRiskCounts:
     )
 
 
-def _top_entities(db: Session, entity_type: EntityType, limit: int) -> list[TopEntity]:
+def _top_entities(db: Session, entity_type: EntityType, limit: int, risk: str) -> list[TopEntity]:
+    """Top entities of one type, ordered by one risk score only."""
     model = Customer if entity_type == EntityType.CUSTOMER else Store
     latest = latest_score_subquery(entity_type)
-    max_expr = case(
-        (latest.c.fraud_score >= latest.c.default_score, latest.c.fraud_score),
-        else_=latest.c.default_score,
-    )
+    sort_column = latest.c.fraud_score if risk == "fraud" else latest.c.default_score
     rows = db.execute(
         select(
             model.id.label("id"),
@@ -97,11 +95,10 @@ def _top_entities(db: Session, entity_type: EntityType, limit: int) -> list[TopE
             latest.c.fraud_band,
             latest.c.default_score,
             latest.c.default_band,
-            max_expr.label("max_score"),
         )
         .select_from(model)
         .join(latest, latest.c.entity_id == model.id)
-        .order_by(max_expr.desc(), model.id)
+        .order_by(sort_column.desc(), model.id)
         .limit(limit)
     ).all()
 
@@ -115,10 +112,20 @@ def _top_entities(db: Session, entity_type: EntityType, limit: int) -> list[TopE
             fraud_band=r.fraud_band,
             default_score=float(r.default_score),
             default_band=r.default_band,
-            max_score=float(r.max_score),
         )
         for r in rows
     ]
+
+
+def _top_list(db: Session, risk: str) -> list[TopEntity]:
+    """Customers and stores merged, ranked on one risk score only."""
+    merged = (
+        _top_entities(db, EntityType.CUSTOMER, TOP_LIMIT, risk)
+        + _top_entities(db, EntityType.STORE, TOP_LIMIT, risk)
+    )
+    attr = "fraud_score" if risk == "fraud" else "default_score"
+    merged.sort(key=lambda e: (-getattr(e, attr), e.entity_id))
+    return merged[:TOP_LIMIT]
 
 
 def _trend(db: Session) -> list[TrendPoint]:
@@ -144,12 +151,9 @@ def _trend(db: Session) -> list[TrendPoint]:
         for r in rows
     ]
 
+
 @router.get("/summary", response_model=DashboardSummary)
 def dashboard_summary(db: Session = Depends(get_db)):
-    customer_top = _top_entities(db, EntityType.CUSTOMER, TOP_LIMIT)
-    store_top = _top_entities(db, EntityType.STORE, TOP_LIMIT)
-    top = sorted(customer_top + store_top, key=lambda e: e.max_score, reverse=True)[:TOP_LIMIT]
-
     latest_row = db.execute(
         select(RiskScore.model_version, RiskScore.computed_at)
         .order_by(RiskScore.id.desc())
@@ -160,7 +164,8 @@ def dashboard_summary(db: Session = Depends(get_db)):
         customers=_entity_counts(db, EntityType.CUSTOMER),
         stores=_entity_counts(db, EntityType.STORE),
         trend=_trend(db),
-        top_entities=top,
+        top_fraud=_top_list(db, "fraud"),
+        top_default=_top_list(db, "default"),
         model_version=latest_row.model_version if latest_row else None,
         computed_at=latest_row.computed_at if latest_row else None,
     )

@@ -16,8 +16,12 @@ CITIES = ["Riyadh", "Jeddah", "Dammam", "Makkah", "Madinah", "Khobar"]
 EMAIL_DOMAINS = ["gmail.com", "outlook.com", "hotmail.com", "yahoo.com"]
 
 # Child tables first so foreign keys are respected when resetting.
-RESET_ORDER = ["payment_events", "transactions", "deals", "risk_scores",
+RESET_ORDER = ["shipment_predictions","shipments","payment_events", "transactions", "deals", "risk_scores",
                "customers", "stores"]
+
+# Offset for the customer city stream. A separate seed means adding city
+# does not change any existing draw (names, IDs, phones, profiles, stores).
+CITY_SEED_OFFSET = 3
 
 
 def _unique_ints(rng: np.random.Generator, n: int, low: int, high: int) -> list[int]:
@@ -61,6 +65,11 @@ def build_customers(rng: np.random.Generator, fake: Faker, cfg: GeneratorConfig)
     phones = _unique_ints(rng, n, 0, 10**8)
     domains = rng.choice(EMAIL_DOMAINS, size=n)
 
+    # City uses its own stream so the draws above are unchanged.
+    # Uniform over the six cities. Used for shipment origin-destination distance.
+    city_rng = np.random.default_rng(cfg.seed + CITY_SEED_OFFSET)
+    cities = city_rng.choice(CITIES, size=n)
+
     df = pd.DataFrame({
         "profile": profiles,
         "cluster_id": None,
@@ -68,6 +77,7 @@ def build_customers(rng: np.random.Generator, fake: Faker, cfg: GeneratorConfig)
         "national_id_hash": [_hash_national_id(str(x)) for x in national_ids],
         "phone": [f"05{p:08d}" for p in phones],
         "email": [f"user{i:05d}@{d}" for i, d in enumerate(domains)],
+        "city": cities,
         "created_at": created_at,
     })
 
@@ -124,6 +134,7 @@ def insert_customers(session: Session, df: pd.DataFrame) -> pd.DataFrame:
             national_id_hash=row.national_id_hash,
             phone=row.phone,
             email=row.email,
+            city=row.city,
             created_at=row.created_at.to_pydatetime(),
             account_status=AccountStatus.ACTIVE,
             synthetic_profile=row.profile,

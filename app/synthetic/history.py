@@ -18,9 +18,11 @@ from app.models import (
     Store,
     Transaction,
     TransactionStatus,
+     Shipment,
 )
 from app.synthetic.config import GeneratorConfig
 from app.synthetic.population import build_customers, build_stores
+from app.synthetic.shipments import generate_shipments
 
 # ---------- Behavior parameters ----------
 
@@ -389,11 +391,14 @@ def simulate_history(
         update(Customer),
         [{"id": cid, "default_label": lab} for cid, lab in labels.items()],
     )
+    shipment_counts = generate_shipments(session, cfg, store_profile_by_id)
+    print("Shipments:", shipment_counts)
     return labels
 
 
 def reset_history(session: Session) -> None:
     """Delete deals, transactions and payment events. Customers and stores are kept."""
+    session.execute(delete(Shipment))
     session.execute(delete(PaymentEvent))
     session.execute(delete(Transaction))
     session.execute(delete(Deal))

@@ -6,10 +6,17 @@ import api_client
 from api_client import ApiError
 from common import BAND_COLORS, UNSCORED_COLOR, fmt_date, fmt_score, render_sidebar, style_bands
 
+
+TOP_N = 10
 st.set_page_config(page_title="Overview", layout="wide")
 render_sidebar()
 st.title("Overview")
+#st.caption("Risk counts, trend, and the riskiest entities. Read-only.")
 st.caption("Risk counts, trend, and the riskiest entities. Read-only.")
+st.info(
+    "Store risk scores are not built yet, so every store shows as Unscored. "
+    "Default scores are percentile ranks among customers."
+)
 
 try:
     summary = api_client.get("/dashboard/summary")
@@ -69,6 +76,24 @@ def render_counts(block: dict) -> None:
     )
     st.plotly_chart(fig, use_container_width=True)
 
+def render_top(entities: list[dict], risk: str) -> None:
+    """Table of the riskiest entities for one risk type."""
+    if not entities:
+        st.info("No scored entities yet.")
+        return
+    score_label = "Fraud score" if risk == "fraud" else "Default percentile"
+    df = pd.DataFrame([
+        {
+            "Type": e["entity_type"].title(),
+            "ID": e["entity_id"],
+            "Name": e["name"],
+            "Status": e["account_status"],
+            score_label: fmt_score(e[f"{risk}_score"]),
+            "Band": e[f"{risk}_band"].title(),
+        }
+        for e in entities
+    ])
+    st.dataframe(style_bands(df, ["Band"]), use_container_width=True)
 
 tab_customers, tab_stores = st.tabs(["Customers", "Stores"])
 with tab_customers:
@@ -94,25 +119,11 @@ else:
     st.info("No score history yet.")
 
 st.divider()
-st.subheader(f"Top {len(summary['top_entities'])} riskiest entities")
-top = summary["top_entities"]
-if top:
-    table = style_bands(
-        pd.DataFrame([
-            {
-                "Type": e["entity_type"].title(),
-                "ID": e["entity_id"],
-                "Name": e["name"],
-                "Status": e["account_status"],
-                "Fraud score": fmt_score(e["fraud_score"]),
-                "Fraud band": e["fraud_band"].title(),
-                "Default score": fmt_score(e["default_score"]),
-                "Default band": e["default_band"].title(),
-            }
-            for e in top
-        ]),
-        ["Fraud band", "Default band"],
-    )
-    st.dataframe(table, use_container_width=True)
-else:
-    st.info("No scored entities yet.")
+st.subheader(f"Top {TOP_N} by fraud score")
+st.caption("Fraud scores are absolute (0 to 100). This list is ranked on fraud score only.")
+render_top(summary["top_fraud"], "fraud")
+
+st.divider()
+st.subheader(f"Top {TOP_N} by default percentile")
+st.caption("Percentile rank among scored customers. This list is ranked on default only.")
+render_top(summary["top_default"], "default")

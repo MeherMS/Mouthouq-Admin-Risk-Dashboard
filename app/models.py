@@ -107,6 +107,7 @@ class Customer(Base):
     national_id_hash: Mapped[str] = mapped_column(String(64), unique=True, index=True)
     phone: Mapped[str] = mapped_column(String(32), index=True)
     email: Mapped[str] = mapped_column(String(255), index=True)
+    city: Mapped[str | None] = mapped_column(String(32), nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=utcnow)
     account_status: Mapped[AccountStatus] = mapped_column(
         _enum(AccountStatus, "account_status"), default=AccountStatus.ACTIVE
@@ -156,6 +157,33 @@ class Deal(Base):
     customer: Mapped[Customer] = relationship(back_populates="deals")
     store: Mapped[Store] = relationship(back_populates="deals")
     transactions: Mapped[list["Transaction"]] = relationship(back_populates="deal")
+
+class Shipment(Base):
+    """One physical delivery per deal (physical-category stores only).
+
+    final_status: 'delivered' or 'rto' (return to origin).
+    failure_reason: 'address_not_found', 'recipient_unavailable',
+                    'refused_by_customer', or None when delivered first try.
+    store_claimed_delivered: True when the store marked it delivered but the
+                    shipment was not (synthetic fake-delivery case).
+    """
+    __tablename__ = "shipments"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    deal_id: Mapped[int] = mapped_column(
+        ForeignKey("deals.id"), unique=True, index=True
+    )
+    origin_city: Mapped[str] = mapped_column(String(32))
+    destination_city: Mapped[str] = mapped_column(String(32))
+    dispatched_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    expected_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    delivered_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    attempts: Mapped[int] = mapped_column(Integer)
+    final_status: Mapped[str] = mapped_column(String(16), index=True)
+    failure_reason: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    store_claimed_delivered: Mapped[bool] = mapped_column(Boolean, default=False)
+
+    deal: Mapped[Deal] = relationship()
 
 
 class Transaction(Base):
@@ -241,3 +269,17 @@ class User(Base):
     email: Mapped[str] = mapped_column(String(255), unique=True, index=True)
     password_hash: Mapped[str] = mapped_column(String(255))
     role: Mapped[UserRole] = mapped_column(_enum(UserRole, "user_role"))
+
+
+class ShipmentPrediction(Base):
+    """Shipment-level predictions. No foreign key, same pattern as risk_scores."""
+    __tablename__ = "shipment_predictions"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    shipment_id: Mapped[int] = mapped_column(Integer, index=True)
+    delivery_success_pct: Mapped[float] = mapped_column(Float)
+    expected_days: Mapped[float] = mapped_column(Float)
+    reason_if_failed: Mapped[str] = mapped_column(String(32))
+    reason_prob_pct: Mapped[float] = mapped_column(Float)
+    model_version: Mapped[str] = mapped_column(String(64), index=True)
+    computed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))

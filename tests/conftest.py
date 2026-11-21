@@ -3,7 +3,7 @@ import os
 # Must be set BEFORE any app module is imported, because app/db.py
 # creates the engine from DATABASE_URL at import time.
 os.environ["DATABASE_URL"] = "sqlite:///./test_admin_risk.db"
-
+os.environ["API_KEY"] = "test-key"
 from datetime import datetime, timezone  # noqa: E402
 from decimal import Decimal  # noqa: E402
 
@@ -112,7 +112,7 @@ def seeded(db_schema):
 @pytest.fixture
 def client(seeded):
     from app.api.main import app
-    return TestClient(app)
+    return TestClient(app, headers={"X-API-Key": "test-key"})
 
 
 @pytest.fixture
