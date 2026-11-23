@@ -1,3 +1,5 @@
+import json
+
 import pandas as pd
 import streamlit as st
 
@@ -5,7 +7,6 @@ import api_client
 from api_client import ApiError
 from common import (
     BAND_OPTIONS,
-    band_badge,
     fmt_date,
     fmt_money,
     fmt_score,
@@ -18,11 +19,21 @@ from common import (
     show_feedback,
     style_bands,
 )
+from theme import header, notice, score_card, section
 
 st.set_page_config(page_title="Stores", layout="wide")
 render_sidebar()
-st.title("Stores")
-st.caption("Store risk scores are not built yet. All stores show as Unscored until the store model is added.")
+
+header(
+    "Stores",
+    subtitle="Search and filter stores, then select a row to open the profile.",
+    eyebrow="Admin Risk Dashboard",
+)
+
+notice(
+    "<strong>Stores are unscored.</strong> Store risk scores are not built yet, "
+    "so every store shows as Unscored until the store model is added."
+)
 
 # Matches AccountStatus in app/models.py.
 ACCOUNT_STATUS_OPTIONS = ["Any", "active", "pending", "frozen", "rejected"]
@@ -63,13 +74,15 @@ def flatten_store(s: dict) -> dict:
         "Created": fmt_date(s["created_at"]),
     }
 
+
 def fmt_rate(value: float | None) -> str:
-    # Assumes dispute_rate is a fraction (0.15 = 15%). See questions.
+    """Format a fraction (0.15) as a percentage (15.0%)."""
     return "—" if value is None else f"{value * 100:.1f}%"
 
 
 # ---------- Filters ----------
 
+section("Find stores")
 c1, c2, c3, c4 = st.columns([3, 1.5, 1.5, 1.5])
 q = c1.text_input("Search name or registration number")
 status = c2.selectbox("Account status", ACCOUNT_STATUS_OPTIONS)
@@ -129,6 +142,8 @@ if items:
         on_select="rerun",
         selection_mode="single-row",
         key="stores_table",
+        hide_index=True,
+        use_container_width=True,
     )
     selected_rows = event.selection.rows if event and event.selection else []
     if selected_rows:
@@ -165,45 +180,54 @@ except ApiError as err:
 
 show_feedback()
 
-st.subheader(f"{store['name']} (ID {store['id']})")
+st.markdown(f"### {store['name']}")
 st.caption(
-    f"Registration {store['commercial_registration_no']}  ·  "
+    f"ID {store['id']}  ·  Registration {store['commercial_registration_no']}  ·  "
     f"{store['category']}  ·  {store['city']}  ·  "
-    f"Status: {store['account_status']}  ·  Created {fmt_date(store['created_at'])}"
+    f"Status {store['account_status']}  ·  Created {fmt_date(store['created_at'])}"
 )
 
+section("Risk scores")
 scores = store.get("scores")
 if scores is None:
-    st.info("Store risk scoring is not built yet. This store has no risk score.")
-    #st.warning("No risk score available for this store.")
+    notice("<strong>Unscored.</strong> Store risk scoring is not built yet. This store has no risk score.")
 else:
-    m1, m2 = st.columns(2)
-    with m1:
-        st.markdown("**Fraud risk**")
-        st.metric("Score (0–100)", fmt_score(scores["fraud_score"]))
-        st.markdown(band_badge(scores["fraud_band"]), unsafe_allow_html=True)
-    with m2:
-        st.markdown("**Default risk**")
-        st.metric("Default percentile (0–100)", fmt_score(scores["default_score"]))
-        st.markdown(band_badge(scores["default_band"]), unsafe_allow_html=True)
+    if scores["model_version"].startswith("placeholder"):
+        notice("<strong>Placeholder scores.</strong> These values are random, not model output.")
+
+    s1, s2 = st.columns(2)
+    with s1:
+        score_card(
+            title="Fraud risk",
+            value=fmt_score(scores["fraud_score"]),
+            band=scores["fraud_band"],
+            note="Absolute score from 0 to 100. Medium from 40, high from 70.",
+        )
+    with s2:
+        score_card(
+            title="Default risk",
+            value=fmt_score(scores["default_score"]),
+            band=scores["default_band"],
+            note="Percentile among scored entities. High is the top 1%, "
+                 "medium the next 9%, low the rest.",
+        )
 
     st.caption(
         f"Model {scores['model_version']}  ·  computed {fmt_date(scores['computed_at'])}"
     )
-    if scores["model_version"].startswith("placeholder"):
-        st.warning("These scores are random placeholders, not model output.")
 
     factors = scores.get("top_factors")
     if factors:
-        st.markdown("**Top factors**")
-        st.json(factors)
-    else:
-        st.caption("No explanations yet (top factors are filled by the scoring job).")
+        section("Why this score")
+        with st.expander("Raw explanation data"):
+            st.json(factors)
 
 st.divider()
+section("Score history")
 render_score_history("store", store["id"])
+
 st.divider()
-st.markdown("**Deal statistics**")
+section("Deal statistics")
 stats = store["stats"]
 s1, s2, s3, s4, s5 = st.columns(5)
 s1.metric("Total deals", f"{stats['total_deals']:,}")
@@ -212,20 +236,13 @@ s3.metric("Dispute rate", fmt_rate(stats["dispute_rate"]))
 s4.metric("Refunded deals", f"{stats['refunded_deals']:,}")
 s5.metric("Refund rate", fmt_rate(stats["refund_rate"]))
 st.caption(
-    f"Refund rate = refunded deals / {stats['paid_deals']:,} deals with a payment record."
+    f"Refund rate = refunded deals / {stats['paid_deals']:,} deals with a payment record. "
+    "Delivery failures are not shown yet, because the API does not return shipment data for stores."
 )
-st.caption(
-    "Delivery failures: not shown yet. Shipment data exists, but the API does not return it yet."
-    #"Delivery failures: not available. The data does not record them yet."
-)
-st.divider()
-render_actions(f"/stores/{store['id']}", STORE_ACTIONS)
+
 
 st.divider()
-render_note_form(f"/stores/{store['id']}")
-
-st.divider()
-st.markdown("**Recent deals**")
+section("Recent deals")
 deals = store.get("recent_deals", [])
 if deals:
     st.dataframe(
@@ -241,12 +258,22 @@ if deals:
             for d in deals
         ]),
         hide_index=True,
+        use_container_width=True,
     )
 else:
     st.caption("No deals for this store.")
 
 st.divider()
-render_history(f"/stores/{store['id']}")
+section("Transactions")
+render_transaction_timeline(f"/stores/{store['id']}")
+
 
 st.divider()
-render_transaction_timeline(f"/stores/{store['id']}")
+section("Admin actions")
+render_actions(f"/stores/{store['id']}", STORE_ACTIONS)
+render_note_form(f"/stores/{store['id']}")
+
+
+st.divider()
+section("History")
+render_history(f"/stores/{store['id']}")

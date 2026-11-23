@@ -1,15 +1,14 @@
-import pandas as pd
-import streamlit as st
 import json
-from config import FACTOR_LABELS
+
+import pandas as pd
 import plotly.graph_objects as go
+import streamlit as st
+
 import api_client
 from api_client import ApiError
-from common import render_shipment_stats
 from common import (
     BAND_OPTIONS,
     CUSTOMER_ACTIONS,
-    band_badge,
     fmt_date,
     fmt_money,
     fmt_score,
@@ -17,15 +16,23 @@ from common import (
     render_history,
     render_note_form,
     render_score_history,
+    render_shipment_stats,
     render_sidebar,
     render_transaction_timeline,
     show_feedback,
     style_bands,
 )
+from config import FACTOR_LABELS
+from theme import COLORS, header, notice, score_card, section, style_figure
 
 st.set_page_config(page_title="Customers", layout="wide")
 render_sidebar()
-st.title("Customers")
+
+header(
+    "Customers",
+    subtitle="Search and filter customers, then select a row to open the profile.",
+    eyebrow="Admin Risk Dashboard",
+)
 
 # Matches AccountStatus in app/models.py.
 ACCOUNT_STATUS_OPTIONS = ["Any", "active", "pending", "frozen", "rejected"]
@@ -39,39 +46,46 @@ SORT_OPTIONS = {
 }
 PAGE_SIZE = 50
 
-def render_top_factors(raw):
-    if not raw:
-        st.caption("No factors available yet.")
-        return
 
+def render_top_factors(raw) -> None:
+    """Default drivers chart and fraud rules for one customer."""
     data = json.loads(raw) if isinstance(raw, str) else raw
-    if not isinstance(data, dict):
-        st.caption("No factors available yet.")
+    if not data or not isinstance(data, dict):
+        st.caption("No explanations yet. The scoring job fills these in.")
         return
 
     default_items = data.get("default", [])
     fraud_items = data.get("fraud", [])
 
-    st.markdown("**Default risk drivers**")
-    if default_items:
-        names = [FACTOR_LABELS.get(f["factor"], f["factor"]) for f in default_items][::-1]
-        values = [f["log_odds_contribution"] for f in default_items][::-1]
-        fig = go.Figure(go.Bar(x=values, y=names, orientation="h", marker_color="#d9534f"))
-        fig.update_layout(
-            height=220,
-            margin=dict(l=10, r=10, t=10, b=10),
-            xaxis_title="Log-odds contribution (higher = more risk)",
-        )
-        st.plotly_chart(fig, use_container_width=True)
-    else:
-        st.caption("No default factors above zero.")
+    left, right = st.columns([3, 2])
 
-    if fraud_items:
+    with left:
+        st.markdown("**Default risk drivers**")
+        if default_items:
+            names = [FACTOR_LABELS.get(f["factor"], f["factor"]) for f in default_items][::-1]
+            values = [f["log_odds_contribution"] for f in default_items][::-1]
+            fig = go.Figure(go.Bar(
+                x=values,
+                y=names,
+                orientation="h",
+                marker_color=COLORS["high"],
+            ))
+            fig.update_layout(
+                height=240,
+                xaxis_title="Log-odds contribution (higher means more risk)",
+            )
+            st.plotly_chart(style_figure(fig), use_container_width=True, config={"displayModeBar": False})
+        else:
+            st.caption("No default factors above zero.")
+
+    with right:
         st.markdown("**Fraud rules triggered**")
-        for f in fraud_items:
-            st.write(f"- {f['detail']} ({f['points']} points)")
-    else:
-        st.caption("No fraud rules triggered.")
+        if fraud_items:
+            for f in fraud_items:
+                st.markdown(f"- {f['detail']} · **{f['points']} pts**")
+        else:
+            st.caption("No fraud rules triggered.")
+
 
 def flatten_customer(c: dict) -> dict:
     s = c.get("scores") or {}
@@ -88,8 +102,11 @@ def flatten_customer(c: dict) -> dict:
         "Model": s.get("model_version") or "—",
         "Created": fmt_date(c["created_at"]),
     }
+
+
 # ---------- Filters ----------
 
+section("Find customers")
 c1, c2, c3, c4 = st.columns([3, 1.5, 1.5, 1.5])
 q = c1.text_input("Search name, phone or email")
 status = c2.selectbox("Account status", ACCOUNT_STATUS_OPTIONS)
@@ -143,6 +160,8 @@ if items:
         on_select="rerun",
         selection_mode="single-row",
         key="customers_table",
+        hide_index=True,
+        use_container_width=True,
     )
     selected_rows = event.selection.rows if event and event.selection else []
     if selected_rows:
@@ -179,53 +198,61 @@ except ApiError as err:
 
 show_feedback()
 
-st.subheader(f"{cust['name']} (ID {cust['id']})")
+st.markdown(f"### {cust['name']}")
 st.caption(
-    f"Phone {cust['phone']}  ·  {cust['email']}  ·  "
-    f"Status: {cust['account_status']}  ·  Created {fmt_date(cust['created_at'])}"
+    f"ID {cust['id']}  ·  {cust['phone']}  ·  {cust['email']}  ·  "
+    f"Status {cust['account_status']}  ·  Created {fmt_date(cust['created_at'])}"
 )
 
+section("Risk scores")
 scores = cust.get("scores")
 if scores is None:
-    st.warning("No risk score available for this customer.")
+    notice("<strong>No risk score</strong> is available for this customer yet.")
 else:
-    m1, m2 = st.columns(2)
-    with m1:
-        st.markdown("**Fraud risk**")
-        st.metric("Default percentile (0–100)", fmt_score(scores["default_score"]))
-        st.markdown(band_badge(scores["default_band"]), unsafe_allow_html=True)
-        st.caption("Percentile rank among scored customers. Top 1% = High, next 9% = Medium, rest = Low.")
-    with m2:
-        st.markdown("**Default risk**")
-        st.metric("Score (0–100)", fmt_score(scores["default_score"]))
-        st.markdown(band_badge(scores["default_band"]), unsafe_allow_html=True)
+    is_placeholder = scores["model_version"].startswith("placeholder")
+    if is_placeholder:
+        notice("<strong>Placeholder scores.</strong> These values are random, not model output.")
+
+    s1, s2 = st.columns(2)
+    with s1:
+        score_card(
+            title="Fraud risk",
+            value=fmt_score(scores["fraud_score"]),
+            band=scores["fraud_band"],
+            note="Absolute score from 0 to 100. Medium from 40, high from 70. "
+                 "Rules: shared phone numbers and repeated cancellations.",
+        )
+    with s2:
+        score_card(
+            title="Default risk",
+            value=fmt_score(scores["default_score"]),
+            band=scores["default_band"],
+            note="Percentile among scored customers. High is the top 1%, "
+                 "medium the next 9%, low the rest.",
+        )
 
     st.caption(
         f"Model {scores['model_version']}  ·  computed {fmt_date(scores['computed_at'])}"
     )
-    if scores["model_version"].startswith("placeholder"):
-        st.warning("These scores are random placeholders, not model output.")
 
+    section("Why this score")
     factors = scores.get("top_factors")
     render_top_factors(factors)
     if factors:
-        st.markdown("**Top factors**")
-        st.json(factors)
-    else:
-        st.caption("No explanations yet (top factors are filled by the scoring job).")
+        with st.expander("Raw explanation data"):
+            st.json(factors)
 
 st.divider()
+section("Score history")
 render_score_history("customer", cust["id"])
+
 st.divider()
+section("Shipments")
 render_shipment_stats(cust["id"])
-st.divider()
-render_actions(f"/customers/{cust['id']}", CUSTOMER_ACTIONS)
+
 
 st.divider()
-render_note_form(f"/customers/{cust['id']}")
-
-st.divider()
-st.markdown("**Recent deals**")
+section("Recent deals")
 deals = cust.get("recent_deals", [])
 if deals:
     st.dataframe(
@@ -241,13 +268,21 @@ if deals:
             for d in deals
         ]),
         hide_index=True,
+        use_container_width=True,
     )
 else:
     st.caption("No deals for this customer.")
 
-
 st.divider()
-render_history(f"/customers/{cust['id']}")
-
-st.divider()
+section("Transactions")
 render_transaction_timeline(f"/customers/{cust['id']}")
+
+st.divider()
+section("Admin actions")
+render_actions(f"/customers/{cust['id']}", CUSTOMER_ACTIONS)
+render_note_form(f"/customers/{cust['id']}")
+
+
+st.divider()
+section("History")
+render_history(f"/customers/{cust['id']}")

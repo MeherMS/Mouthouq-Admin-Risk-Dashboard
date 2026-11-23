@@ -13,6 +13,8 @@ from app.api.routers import entity_history
 from app.api.routers import score_history
 from app.api.routers import transaction_timeline
 from app.api.routers import customer_shipments
+from app.api.routers import database_overview
+
 
 # Interactive docs are off by default, so a public deployment does not show the API layout.
 # Set ENABLE_DOCS=1 locally to turn them on.
@@ -37,6 +39,7 @@ app.include_router(entity_history.router)
 app.include_router(score_history.router)
 app.include_router(transaction_timeline.router)
 app.include_router(customer_shipments.router)
+app.include_router(database_overview.router)
 
 
 @app.get("/health")

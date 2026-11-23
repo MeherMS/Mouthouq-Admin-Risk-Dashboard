@@ -4,6 +4,7 @@ import streamlit as st
 from api_client import ApiError
 import plotly.express as px
 from backend_status import wait_for_backend
+from theme import inject_theme
 
 from config import (
     BAND_COLORS,
@@ -33,6 +34,7 @@ CUSTOMER_ACTIONS = [
 
 def render_sidebar() -> None:
     """Shared sidebar. Call at the top of every page."""
+    inject_theme()
     st.sidebar.title("Admin Risk Dashboard")
     label = st.sidebar.selectbox("Acting as", list(ADMIN_CHOICES), index=0)
     identity = ADMIN_CHOICES[label]
