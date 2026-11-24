@@ -14,6 +14,7 @@ from app.api.routers import score_history
 from app.api.routers import transaction_timeline
 from app.api.routers import customer_shipments
 from app.api.routers import database_overview
+from app.api.routers import map_data
 
 
 # Interactive docs are off by default, so a public deployment does not show the API layout.
@@ -40,7 +41,7 @@ app.include_router(score_history.router)
 app.include_router(transaction_timeline.router)
 app.include_router(customer_shipments.router)
 app.include_router(database_overview.router)
-
+app.include_router(map_data.router)
 
 @app.get("/health")
 def health() -> dict:
